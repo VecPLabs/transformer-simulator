@@ -1,0 +1,35 @@
+{
+  "name": "transformer-simulator",
+  "version": "1.0.0",
+  "description": "Interactive transformer architecture simulator. Build, visualize, and share custom model architectures at the primitive level.",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "vite": "^6.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/vecplabs/transformer-simulator"
+  },
+  "keywords": [
+    "transformer",
+    "architecture",
+    "simulator",
+    "machine-learning",
+    "neural-network",
+    "model-design",
+    "ai",
+    "deep-learning"
+  ],
+  "author": "VecP Labs",
+  "license": "MIT"
+}
