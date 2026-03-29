@@ -5,7 +5,8 @@ import { ARCH_PRESETS } from "./data/presets";
 import { resolve } from "./data/dimensions";
 import { uid } from "./utils/uid";
 import { fmt, fmtBytes } from "./utils/format";
-import { S, font } from "./components/styles";
+import { S, font, THEMES } from "./components/styles";
+import HelpOverlay from "./components/HelpOverlay";
 import LayerCard from "./components/LayerCard";
 import ConfigPanel from "./components/ConfigPanel";
 import StatsPanel from "./components/StatsPanel";
@@ -135,6 +136,22 @@ export default function TransformerSimV2() {
   const toastTimer = useRef(null);
   const [budget, setBudget] = useState(null); // null = off, number = target params
 
+  // Theme
+  const [theme, setTheme] = useState(() => {
+    const saved = localStorage.getItem("tsim-theme");
+    if (saved === "light" || saved === "dark") return saved;
+    return window.matchMedia?.("(prefers-color-scheme: light)").matches ? "light" : "dark";
+  });
+  const toggleTheme = () => {
+    const next = theme === "dark" ? "light" : "dark";
+    setTheme(next);
+    localStorage.setItem("tsim-theme", next);
+  };
+
+  // Help / Onboarding
+  const [showHelp, setShowHelp] = useState(() => !localStorage.getItem("tsim-seen-help"));
+  const dismissHelp = () => { setShowHelp(false); localStorage.setItem("tsim-seen-help", "1"); };
+
   const showToast = useCallback((msg, type = "success") => {
     setToast({ msg, type });
     if (toastTimer.current) clearTimeout(toastTimer.current);
@@ -184,10 +201,23 @@ export default function TransformerSimV2() {
       const mod = isMac ? e.metaKey : e.ctrlKey;
       if (mod && e.key === "z" && !e.shiftKey) { e.preventDefault(); undo(); }
       if (mod && (e.key === "y" || (e.key === "z" && e.shiftKey))) { e.preventDefault(); redo(); }
+      if (mod && e.key === "s") { e.preventDefault(); setShowShareModal(true); }
+      if (mod && e.shiftKey && (e.key === "E" || e.key === "e")) {
+        e.preventDefault();
+        setLayers(prev => prev.map(l => ({ ...l, collapsed: false, blocks: l.blocks.map(b => ({ ...b, collapsed: false })) })));
+      }
+      if (mod && e.shiftKey && (e.key === "C" || e.key === "c")) {
+        e.preventDefault();
+        setLayers(prev => prev.map(l => ({ ...l, collapsed: true, blocks: l.blocks.map(b => ({ ...b, collapsed: true })) })));
+      }
+      if (e.key === "?" && !e.ctrlKey && !e.metaKey && e.target.tagName !== "INPUT" && e.target.tagName !== "TEXTAREA" && e.target.tagName !== "SELECT") {
+        e.preventDefault();
+        setShowHelp(true);
+      }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [undo, redo]);
+  }, [undo, redo, setLayers]);
 
   // Stats
   const stats = useMemo(() => {
@@ -251,23 +281,35 @@ export default function TransformerSimV2() {
     } catch {}
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Apply theme CSS variables
+  const themeVars = THEMES[theme] || THEMES.dark;
+
   return (
     <div style={{
-      background: "#060a14", color: "#c8d6e5", minHeight: "100vh", fontFamily: font,
-      backgroundImage: "linear-gradient(rgba(34,197,94,0.015) 1px, transparent 1px), linear-gradient(90deg, rgba(34,197,94,0.015) 1px, transparent 1px)",
+      ...themeVars,
+      background: "var(--bg)", color: "var(--text)", minHeight: "100vh", fontFamily: font,
+      backgroundImage: `linear-gradient(var(--bg-grid) 1px, transparent 1px), linear-gradient(90deg, var(--bg-grid) 1px, transparent 1px)`,
       backgroundSize: "20px 20px",
     }}>
       <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
       <style>{`
         ::-webkit-scrollbar { width: 4px; }
-        ::-webkit-scrollbar-thumb { background: #172035; border-radius: 2px; }
+        ::-webkit-scrollbar-thumb { background: var(--scrollbar, #172035); border-radius: 2px; }
         input[type="range"] { height: 2px; }
         * { box-sizing: border-box; }
         @keyframes toastIn {
           from { opacity: 0; transform: translateX(-50%) translateY(10px); }
           to { opacity: 1; transform: translateX(-50%) translateY(0); }
         }
+        @media (max-width: 480px) {
+          input[type="range"] { height: 6px; }
+          input[type="range"]::-webkit-slider-thumb { width: 18px; height: 18px; }
+          button { min-height: 32px; }
+        }
       `}</style>
+
+      {/* Help Overlay */}
+      {showHelp && <HelpOverlay onClose={dismissHelp} />}
 
       {/* Toast */}
       <Toast toast={toast} />
@@ -287,23 +329,31 @@ export default function TransformerSimV2() {
       <div style={{ padding: "14px 14px 0" }}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
           <div>
-            <div style={{ fontSize: 7, color: "#22c55e", letterSpacing: "0.4em", textTransform: "uppercase", fontWeight: 600 }}>VecP Labs</div>
-            <h1 style={{ fontSize: 16, fontWeight: 700, color: "#e2eaf2", margin: "2px 0 0", letterSpacing: "-0.02em" }}>
-              Transformer Simulator <span style={{ fontSize: 9, color: "#3e5775", fontWeight: 400 }}>v2</span>
+            <div style={{ fontSize: 7, color: "var(--accent-green)", letterSpacing: "0.4em", textTransform: "uppercase", fontWeight: 600 }}>VecP Labs</div>
+            <h1 style={{ fontSize: 16, fontWeight: 700, color: "var(--text-bright)", margin: "2px 0 0", letterSpacing: "-0.02em" }}>
+              Transformer Simulator <span style={{ fontSize: 9, color: "var(--muted)", fontWeight: 400 }}>v2</span>
             </h1>
           </div>
           <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+            <button onClick={() => setShowHelp(true)} title="Help (?)" style={{
+              background: "none", border: "1px solid var(--border)", borderRadius: 3, padding: "4px 7px",
+              color: "var(--muted)", cursor: "pointer", fontSize: 9, fontFamily: font, fontWeight: 700,
+            }}>?</button>
+            <button onClick={toggleTheme} title={`Switch to ${theme === "dark" ? "light" : "dark"} theme`} style={{
+              background: "none", border: "1px solid var(--border)", borderRadius: 3, padding: "4px 7px",
+              color: "var(--muted)", cursor: "pointer", fontSize: 9, fontFamily: font,
+            }}>{theme === "dark" ? "☀" : "☾"}</button>
             <button onClick={undo} disabled={!canUndo} title="Undo (Ctrl+Z)" style={{
-              background: "none", border: "1px solid #172035", borderRadius: 3, padding: "4px 7px",
-              color: canUndo ? "#6b8299" : "#1a2744", cursor: canUndo ? "pointer" : "default",
+              background: "none", border: "1px solid var(--border)", borderRadius: 3, padding: "4px 7px",
+              color: canUndo ? "var(--text-secondary)" : "var(--muted-faint)", cursor: canUndo ? "pointer" : "default",
               fontSize: 9, fontFamily: font,
             }}>↩</button>
             <button onClick={redo} disabled={!canRedo} title="Redo (Ctrl+Y)" style={{
-              background: "none", border: "1px solid #172035", borderRadius: 3, padding: "4px 7px",
-              color: canRedo ? "#6b8299" : "#1a2744", cursor: canRedo ? "pointer" : "default",
+              background: "none", border: "1px solid var(--border)", borderRadius: 3, padding: "4px 7px",
+              color: canRedo ? "var(--text-secondary)" : "var(--muted-faint)", cursor: canRedo ? "pointer" : "default",
               fontSize: 9, fontFamily: font,
             }}>↪</button>
-            <button onClick={() => setShowShareModal(true)} style={{
+            <button onClick={() => setShowShareModal(true)} title="Share (Ctrl+S)" style={{
               background: "linear-gradient(135deg, #22c55e, #16a34a)", color: "#000",
               border: "none", borderRadius: 4, padding: "5px 10px", fontSize: 8,
               fontFamily: font, fontWeight: 700, cursor: "pointer", letterSpacing: "0.1em", textTransform: "uppercase",
@@ -481,8 +531,8 @@ export default function TransformerSimV2() {
         </div>
       )}
 
-      <div style={{ textAlign: "center", padding: "8px 0 16px", fontSize: 7, color: "#111827" }}>
-        Drag primitives to reorder · Double-click block names to rename · ⚙ to configure · Ctrl+Z / Ctrl+Y to undo/redo
+      <div style={{ textAlign: "center", padding: "8px 14px 16px", fontSize: 7, color: "var(--muted-faint)", lineHeight: 1.8 }}>
+        Ctrl+Z/Y undo/redo · Ctrl+S share · Ctrl+Shift+E expand · Ctrl+Shift+C collapse · ? help
       </div>
     </div>
   );

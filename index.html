@@ -9,8 +9,18 @@
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <style>
       * { margin: 0; padding: 0; box-sizing: border-box; }
-      body { background: #060a14; }
+      body { background: #060a14; transition: background 0.2s; }
     </style>
+    <script>
+      // Prevent flash: apply saved theme to body immediately
+      (function() {
+        var t = localStorage.getItem('tsim-theme');
+        if (t === 'light' || (!t && window.matchMedia('(prefers-color-scheme: light)').matches)) {
+          document.body.style.background = '#f0f2f5';
+          document.querySelector('meta[name="theme-color"]').content = '#f0f2f5';
+        }
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>
