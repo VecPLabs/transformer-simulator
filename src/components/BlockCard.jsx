@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { PRIM } from "../data/primitives";
+import { useState, useMemo } from "react";
+import { PRIM, propagateShapes, computeBlockFlops } from "../data/primitives";
 import { BLOCK_TEMPLATES } from "../data/blockTemplates";
 import { fmt } from "../utils/format";
 import { uid } from "../utils/uid";
@@ -23,6 +23,9 @@ export default function BlockCard({ block, globalCfg, onUpdate, onRemove, onDupl
     const reg = PRIM[p.type];
     return s + (reg ? reg.params(p.cfg, globalCfg) : 0);
   }, 0);
+
+  const shapeInfo = useMemo(() => propagateShapes(block.primitives, globalCfg), [block.primitives, globalCfg]);
+  const blockFlops = useMemo(() => computeBlockFlops(block.primitives, globalCfg), [block.primitives, globalCfg]);
 
   const updatePrim = (idx, prim) => {
     const prims = [...block.primitives];
@@ -85,6 +88,7 @@ export default function BlockCard({ block, globalCfg, onUpdate, onRemove, onDupl
             <span style={{ color: "#2a3f55", fontWeight: 400, marginLeft: 6, fontSize: 9 }}>{block.primitives.length} ops</span>
           </span>
         )}
+        {blockFlops > 0 && <span style={{ fontSize: 8, color: "#06b6d4", fontWeight: 500 }} title="FLOPs/token">{fmt(blockFlops)}F</span>}
         <span style={{ fontSize: 9, color: blockParams > 0 ? "#22c55e" : "#1a2744", fontWeight: 600 }}>
           {blockParams > 0 ? fmt(blockParams) : "0"}
         </span>
@@ -103,27 +107,41 @@ export default function BlockCard({ block, globalCfg, onUpdate, onRemove, onDupl
       {/* Primitives */}
       {!block.collapsed && (
         <div style={{ padding: "4px 6px" }}>
-          {block.primitives.map((prim, idx) => (
-            <div key={prim.id}
-              onDragOver={e => handleDragOver(e, idx)}
-              onDrop={e => handleDrop(e, idx)}
-              onDragLeave={() => setDragOver(null)}
-            >
-              {dragOver === idx && <div style={{ height: 2, background: "#22c55e", borderRadius: 1, margin: "1px 0" }} />}
-              <PrimRow
-                prim={prim} globalCfg={globalCfg}
-                onUpdate={p => updatePrim(idx, p)}
-                onRemove={() => removePrim(idx)}
-                onMove={dir => movePrim(idx, dir)}
-                isFirst={idx === 0}
-                isLast={idx === block.primitives.length - 1}
-                dragH={{
-                  onDragStart: e => handleDragStart(e, idx),
-                  onDragEnd: () => setDragOver(null),
-                }}
-              />
-            </div>
-          ))}
+          {block.primitives.map((prim, idx) => {
+            const si = shapeInfo[idx];
+            const showShapeAfter = si && idx < block.primitives.length - 1 && si.outDim !== si.inDim;
+            return (
+              <div key={prim.id}
+                onDragOver={e => handleDragOver(e, idx)}
+                onDrop={e => handleDrop(e, idx)}
+                onDragLeave={() => setDragOver(null)}
+              >
+                {dragOver === idx && <div style={{ height: 2, background: "#22c55e", borderRadius: 1, margin: "1px 0" }} />}
+                {si?.mismatch && (
+                  <div style={{ fontSize: 7, color: "#ef4444", textAlign: "center", padding: "1px 0", fontFamily: font }}>
+                    ⚠ expects {PRIM[prim.type]?.expectedIn?.(prim.cfg, globalCfg)}, got {si.inDim}
+                  </div>
+                )}
+                <PrimRow
+                  prim={prim} globalCfg={globalCfg}
+                  onUpdate={p => updatePrim(idx, p)}
+                  onRemove={() => removePrim(idx)}
+                  onMove={dir => movePrim(idx, dir)}
+                  isFirst={idx === 0}
+                  isLast={idx === block.primitives.length - 1}
+                  dragH={{
+                    onDragStart: e => handleDragStart(e, idx),
+                    onDragEnd: () => setDragOver(null),
+                  }}
+                />
+                {showShapeAfter && (
+                  <div style={{ fontSize: 7, color: "#3e5775", textAlign: "center", padding: "0 0 1px", fontFamily: font }}>
+                    → [{globalCfg.seqLen}, {si.outDim}]
+                  </div>
+                )}
+              </div>
+            );
+          })}
           <div onDragOver={e => handleDragOver(e, block.primitives.length)} onDrop={e => handleDrop(e, block.primitives.length)} onDragLeave={() => setDragOver(null)} style={{ minHeight: 4 }}>
             {dragOver === block.primitives.length && <div style={{ height: 2, background: "#22c55e", borderRadius: 1 }} />}
           </div>

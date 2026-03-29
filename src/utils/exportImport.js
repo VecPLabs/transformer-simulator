@@ -32,6 +32,7 @@ export function buildExportPayload({ archName, archAuthor, archDesc, stats, glob
       embeddingParams: stats.embP,
       outputParams: stats.outP,
       layerParams: stats.layerP,
+      totalFlops: stats.totalFlops || 0,
       primitiveCounts: Object.entries(stats.primCounts).map(([k, v]) => ({
         type: k, name: PRIM[k]?.name, count: v.count, totalParams: v.params,
       })),

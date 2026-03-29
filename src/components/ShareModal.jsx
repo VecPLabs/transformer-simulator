@@ -68,6 +68,19 @@ export default function ShareModal({
     e.target.value = "";
   };
 
+  const copyLink = async () => {
+    try {
+      const data = buildExportPayload({ archName, archAuthor, archDesc, stats, globalCfg, layers });
+      const json = JSON.stringify(data);
+      const encoded = btoa(encodeURIComponent(json));
+      const url = `${window.location.origin}${window.location.pathname}#config=${encoded}`;
+      await navigator.clipboard.writeText(url);
+      showToast("Shareable link copied!");
+    } catch {
+      showToast("Failed to copy link", "error");
+    }
+  };
+
   const importFromClipboard = async () => {
     try {
       const text = await navigator.clipboard.readText();
@@ -165,8 +178,16 @@ export default function ShareModal({
               ⧉ Copy to Clipboard
             </button>
           </div>
+          <button onClick={copyLink} style={{
+            width: "100%", marginTop: 6, background: "#172035", color: "#c8d6e5",
+            border: "1px solid #22354a", borderRadius: 4, padding: "8px 0", fontSize: 9,
+            fontFamily: font, fontWeight: 600, cursor: "pointer",
+            letterSpacing: "0.08em", textTransform: "uppercase",
+          }}>
+            ⌗ Copy Shareable Link
+          </button>
           <div style={{ fontSize: 8, color: "#2a3f55", marginTop: 4, textAlign: "center" }}>
-            Copy → paste in chat/email/DM → recipient imports
+            Link encodes the full config — recipient clicks to load
           </div>
         </div>
 

@@ -1,5 +1,5 @@
 import { useState, useMemo, useRef, useEffect, useCallback } from "react";
-import { PRIM } from "./data/primitives";
+import { PRIM, computeBlockFlops } from "./data/primitives";
 import { BLOCK_TEMPLATES } from "./data/blockTemplates";
 import { ARCH_PRESETS } from "./data/presets";
 import { resolve } from "./data/dimensions";
@@ -11,6 +11,7 @@ import ConfigPanel from "./components/ConfigPanel";
 import StatsPanel from "./components/StatsPanel";
 import ShareModal from "./components/ShareModal";
 import Toast from "./components/Toast";
+import { buildExportPayload, parseImportData } from "./utils/exportImport";
 
 // ─── Factory helpers ──────────────────────────────────────────────────
 function makePrim(type, cfgOverride, label) {
@@ -128,6 +129,7 @@ export default function TransformerSimV2() {
   const [archDesc, setArchDesc] = useState("");
   const [toast, setToast] = useState(null);
   const toastTimer = useRef(null);
+  const [budget, setBudget] = useState(null); // null = off, number = target params
 
   const showToast = useCallback((msg, type = "success") => {
     setToast({ msg, type });
@@ -189,24 +191,33 @@ export default function TransformerSimV2() {
     const normP = globalCfg.hiddenDim;
     const outP = globalCfg.vocabSize * globalCfg.hiddenDim;
     let layerP = 0;
+    let totalFlops = 0;
     const primCounts = {};
     const perLayer = layers.map((l, i) => {
       let lp = 0;
-      l.blocks.forEach(b => b.primitives.forEach(p => {
-        const reg = PRIM[p.type];
-        if (!reg) return;
-        const pp = reg.params(p.cfg, globalCfg);
-        lp += pp;
-        const k = p.type;
-        if (!primCounts[k]) primCounts[k] = { count: 0, params: 0 };
-        primCounts[k].count++;
-        primCounts[k].params += pp;
-      }));
+      let lf = 0;
+      l.blocks.forEach(b => {
+        lf += computeBlockFlops(b.primitives, globalCfg);
+        b.primitives.forEach(p => {
+          const reg = PRIM[p.type];
+          if (!reg) return;
+          const pp = reg.params(p.cfg, globalCfg);
+          lp += pp;
+          const k = p.type;
+          if (!primCounts[k]) primCounts[k] = { count: 0, params: 0 };
+          primCounts[k].count++;
+          primCounts[k].params += pp;
+        });
+      });
       layerP += lp;
-      return { idx: i, params: lp };
+      totalFlops += lf;
+      return { idx: i, params: lp, flops: lf };
     });
+    // Fixed FLOPs: embedding lookup (~0), final norm, LM head projection
+    const fixedFlops = 5 * globalCfg.hiddenDim + 2 * globalCfg.hiddenDim * globalCfg.vocabSize;
+    totalFlops += fixedFlops;
     const totalP = embP + layerP + normP + outP;
-    return { totalP, embP, layerP, normP, outP, perLayer, primCounts, numLayers: layers.length };
+    return { totalP, embP, layerP, normP, outP, perLayer, primCounts, numLayers: layers.length, totalFlops, fixedFlops };
   }, [layers, globalCfg]);
 
   // Import handler
@@ -216,6 +227,25 @@ export default function TransformerSimV2() {
     setArchAuthor(result.meta.author);
     setArchDesc(result.meta.desc);
   }, [setBoth]);
+
+  // URL hash import on mount
+  useEffect(() => {
+    try {
+      const hash = window.location.hash;
+      if (!hash.startsWith("#config=")) return;
+      const encoded = hash.slice(8);
+      const json = decodeURIComponent(atob(encoded));
+      const data = JSON.parse(json);
+      const result = parseImportData(data);
+      setBoth(result.layers, result.globalCfg);
+      setArchName(result.meta.name);
+      setArchAuthor(result.meta.author);
+      setArchDesc(result.meta.desc);
+      // Clean hash without triggering reload
+      history.replaceState(null, "", window.location.pathname + window.location.search);
+      showToast(`Loaded "${result.meta.name}" from link`);
+    } catch {}
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <div style={{
@@ -284,10 +314,10 @@ export default function TransformerSimV2() {
         </div>
 
         {/* Summary */}
-        <div style={{ display: "flex", gap: 5, marginTop: 10, marginBottom: 8, flexWrap: "wrap" }}>
+        <div style={{ display: "flex", gap: 5, marginTop: 10, marginBottom: budget !== null ? 4 : 8, flexWrap: "wrap" }}>
           {[
             { label: "Total", value: fmt(stats.totalP), color: "#22c55e" },
-            { label: "Layers", value: stats.numLayers, color: "#06b6d4" },
+            { label: "FLOPs/tok", value: fmt(stats.totalFlops), color: "#06b6d4" },
             { label: "F16", value: fmtBytes(stats.totalP * 2), color: "#a855f7" },
             { label: "Q4", value: fmtBytes(stats.totalP * 0.5625), color: "#ec4899" },
           ].map((s, i) => (
@@ -297,6 +327,47 @@ export default function TransformerSimV2() {
             </div>
           ))}
         </div>
+
+        {/* Budget bar */}
+        {budget !== null && (() => {
+          const pct = budget > 0 ? (stats.totalP / budget * 100) : 0;
+          const delta = stats.totalP - budget;
+          const barColor = pct > 100 ? "#ef4444" : pct > 80 ? "#f59e0b" : "#22c55e";
+          return (
+            <div style={{ ...S.panel, padding: "5px 8px", marginBottom: 8, borderLeft: `2px solid ${barColor}` }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 3 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                  <span style={{ fontSize: 7, color: "#3e5775", textTransform: "uppercase", letterSpacing: "0.1em" }}>Budget</span>
+                  <input type="number" value={budget / 1e6} onChange={e => setBudget(Math.max(0, Number(e.target.value)) * 1e6)}
+                    style={{ width: 50, background: "#080c16", border: "1px solid #172035", color: "#a0b4c8", fontFamily: font, fontSize: 9, padding: "1px 3px", borderRadius: 2, textAlign: "right" }} />
+                  <span style={{ fontSize: 8, color: "#3e5775" }}>M</span>
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  <span style={{ fontSize: 9, fontWeight: 600, color: barColor }}>
+                    {delta > 0 ? `+${fmt(delta)} over` : `${fmt(Math.abs(delta))} remaining`}
+                  </span>
+                  <button onClick={() => setBudget(null)} style={{ background: "none", border: "none", color: "#3a2020", cursor: "pointer", fontSize: 9, fontWeight: 700, padding: 0 }}>×</button>
+                </div>
+              </div>
+              <div style={{ height: 4, background: "#080c16", borderRadius: 2, overflow: "hidden" }}>
+                <div style={{ height: "100%", width: `${Math.min(pct, 100)}%`, background: barColor, borderRadius: 2, transition: "width 0.3s, background 0.3s" }} />
+              </div>
+              <div style={{ fontSize: 7, color: "#2a3f55", textAlign: "right", marginTop: 1 }}>{pct.toFixed(1)}%</div>
+            </div>
+          );
+        })()}
+        {budget === null && (
+          <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 4 }}>
+            <button onClick={() => setBudget(Math.round(stats.totalP / 1e6) * 1e6 || 500e6)} style={{
+              background: "none", border: "1px solid #172035", borderRadius: 3,
+              color: "#2a3f55", cursor: "pointer", fontSize: 7, fontFamily: font,
+              padding: "2px 6px", letterSpacing: "0.05em", textTransform: "uppercase",
+            }}
+              onMouseEnter={e => { e.currentTarget.style.borderColor = "#22c55e33"; e.currentTarget.style.color = "#22c55e"; }}
+              onMouseLeave={e => { e.currentTarget.style.borderColor = "#172035"; e.currentTarget.style.color = "#2a3f55"; }}
+            >+ Set Budget</button>
+          </div>
+        )}
 
         {/* Tabs */}
         <div style={{ display: "flex", gap: 2, marginBottom: 6 }}>
