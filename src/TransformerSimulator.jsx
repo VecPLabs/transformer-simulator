@@ -5,6 +5,7 @@ const PRIM = {
   linear: {
     name: "Linear Projection", icon: "─", color: "#ec4899", category: "projection",
     desc: "Wx (learnable matrix multiply)",
+    info: "Multiplies the input by a learned weight matrix W. This is the fundamental building block of transformers — used for Q/K/V projections, output projections, and FFN layers. No bias term.",
     defaultCfg: { inDim: "hiddenDim", outDim: "hiddenDim" },
     params: (cfg, g) => resolve(cfg.inDim, g) * resolve(cfg.outDim, g),
     shape: (cfg, g) => `[${resolve(cfg.inDim, g)}, ${resolve(cfg.outDim, g)}]`,
@@ -16,6 +17,7 @@ const PRIM = {
   linear_bias: {
     name: "Linear + Bias", icon: "━", color: "#f472b6", category: "projection",
     desc: "Wx + b (projection with bias)",
+    info: "Like Linear Projection but adds a learned bias vector b after the matrix multiply. Used in GPT-2 style models. Modern architectures (Llama, Mistral) often omit the bias for efficiency.",
     defaultCfg: { inDim: "hiddenDim", outDim: "hiddenDim" },
     params: (cfg, g) => resolve(cfg.inDim, g) * resolve(cfg.outDim, g) + resolve(cfg.outDim, g),
     shape: (cfg, g) => `[${resolve(cfg.inDim, g)}, ${resolve(cfg.outDim, g)}] + b`,
@@ -27,42 +29,49 @@ const PRIM = {
   silu: {
     name: "SiLU / Swish", icon: "∿", color: "#facc15", category: "activation",
     desc: "x · σ(x)",
+    info: "Sigmoid Linear Unit — multiplies each value by its own sigmoid. Smooth, non-monotonic activation used in Llama, PaLM, and most modern FFN blocks (as part of SwiGLU gating).",
     defaultCfg: {}, params: () => 0, shape: () => "SiLU(x)",
     configFields: [],
   },
   gelu: {
     name: "GELU", icon: "≈", color: "#fbbf24", category: "activation",
     desc: "Gaussian Error Linear Unit",
+    info: "Approximates x multiplied by the probability that x is positive under a Gaussian. Used in BERT, GPT-2, and GPT-3. Smoother than ReLU, similar in spirit to SiLU.",
     defaultCfg: {}, params: () => 0, shape: () => "GELU(x)",
     configFields: [],
   },
   relu: {
     name: "ReLU", icon: "∠", color: "#f59e0b", category: "activation",
     desc: "max(0, x)",
+    info: "Rectified Linear Unit — zeros out negative values, passes positives unchanged. Simple and fast but can cause 'dead neurons'. Largely replaced by GELU/SiLU in modern transformers.",
     defaultCfg: {}, params: () => 0, shape: () => "ReLU(x)",
     configFields: [],
   },
   softmax: {
     name: "Softmax", icon: "σ", color: "#fde68a", category: "activation",
     desc: "Normalized exponential",
+    info: "Converts a vector of raw scores into a probability distribution (all values 0-1, summing to 1). Used in attention to determine how much each token attends to every other token.",
     defaultCfg: {}, params: () => 0, shape: () => "softmax(x)",
     configFields: [],
   },
   gate_mul: {
     name: "Gate Multiply", icon: "⊙", color: "#a78bfa", category: "operation",
     desc: "Element-wise a ⊙ b (gating)",
+    info: "Element-wise multiplication of two tensors. In SwiGLU FFNs, one path goes through an activation (the 'gate') and is multiplied with another linear path. This lets the network learn which features to pass through.",
     defaultCfg: {}, params: () => 0, shape: () => "a ⊙ b",
     configFields: [],
   },
   residual_add: {
     name: "Residual Add", icon: "⊞", color: "#6366f1", category: "operation",
     desc: "x + sublayer(x)",
+    info: "Adds the sublayer's output back to its input (skip connection). Critical for training deep networks — gradients flow directly through the addition, preventing vanishing gradients. Every transformer layer uses this.",
     defaultCfg: {}, params: () => 0, shape: () => "x + f(x)",
     configFields: [],
   },
   scale_dot: {
     name: "Scaled Dot-Product", icon: "⊛", color: "#22d3ee", category: "operation",
     desc: "softmax(QKᵀ/√d)V",
+    info: "The core attention mechanism. Computes similarity between queries (Q) and keys (K), scales by √d to prevent extreme values, applies softmax to get attention weights, then uses those weights to mix values (V). This is how tokens 'look at' each other.",
     defaultCfg: { numHeads: "heads", headDim: "headDim" },
     params: () => 0,
     shape: (cfg, g) => `${resolve(cfg.numHeads, g)}h × ${resolve(cfg.headDim, g)}d`,
@@ -74,6 +83,7 @@ const PRIM = {
   rmsnorm: {
     name: "RMSNorm", icon: "◇", color: "#22c55e", category: "norm",
     desc: "Root Mean Square normalization",
+    info: "Normalizes by dividing by the root mean square of the input, then scales by a learned parameter. Simpler and faster than LayerNorm (no mean subtraction or bias). Used in Llama, Mistral, and most modern architectures.",
     defaultCfg: { dim: "hiddenDim" },
     params: (cfg, g) => resolve(cfg.dim, g),
     shape: (cfg, g) => `γ [${resolve(cfg.dim, g)}]`,
@@ -82,6 +92,7 @@ const PRIM = {
   layernorm: {
     name: "LayerNorm", icon: "◆", color: "#10b981", category: "norm",
     desc: "Layer norm with γ and β",
+    info: "Subtracts the mean and divides by standard deviation across features, then applies learned scale (γ) and shift (β). Stabilizes training by keeping activations in a consistent range. Used in GPT-2/3 and BERT.",
     defaultCfg: { dim: "hiddenDim" },
     params: (cfg, g) => resolve(cfg.dim, g) * 2,
     shape: (cfg, g) => `γ,β [${resolve(cfg.dim, g)}]`,
@@ -90,6 +101,7 @@ const PRIM = {
   dropout: {
     name: "Dropout", icon: "◌", color: "#64748b", category: "regularization",
     desc: "Random zeroing during training",
+    info: "Randomly sets a fraction of values to zero during training, forcing the network to not rely on any single feature. Disabled during inference. Helps prevent overfitting, especially in smaller models.",
     defaultCfg: { rate: 0.1 },
     params: () => 0, shape: (cfg) => `p=${cfg.rate}`,
     configFields: [{ key: "rate", label: "Rate", type: "number", min: 0, max: 1, step: 0.01 }],
@@ -97,24 +109,28 @@ const PRIM = {
   rope: {
     name: "RoPE", icon: "⟳", color: "#0ea5e9", category: "operation",
     desc: "Rotary Position Embedding (no params)",
+    info: "Encodes position by rotating Q and K vectors using sinusoidal frequencies. No learned parameters — position info is baked into the geometry. Enables length generalization and is used in nearly all modern LLMs (Llama, Mistral, etc.).",
     defaultCfg: {}, params: () => 0, shape: () => "rotate(x, θ)",
     configFields: [],
   },
   concat: {
     name: "Concat", icon: "⊕", color: "#8b5cf6", category: "operation",
     desc: "Concatenate along dim",
+    info: "Joins two tensors along a dimension (e.g., combining the outputs of multiple attention heads before the output projection). No learnable parameters.",
     defaultCfg: {}, params: () => 0, shape: () => "cat(a, b)",
     configFields: [],
   },
   split: {
     name: "Split / Branch", icon: "⑂", color: "#7c3aed", category: "operation",
     desc: "Fork tensor into parallel paths",
+    info: "Splits a tensor into multiple parallel paths for independent processing. Used to fork data into Q/K/V streams or to create parallel branches in custom architectures.",
     defaultCfg: {}, params: () => 0, shape: () => "split(x)",
     configFields: [],
   },
   router: {
     name: "Router", icon: "⬡", color: "#f59e0b", category: "operation",
     desc: "Top-k expert routing",
+    info: "Routes each token to the top-K most relevant experts out of N total. A small learned gate network scores each expert, and only the chosen experts process the token. Enables massive model capacity with lower compute (Mixture of Experts).",
     defaultCfg: { numExperts: "moeExperts", topK: "moeTopK", dim: "hiddenDim" },
     params: (cfg, g) => resolve(cfg.dim, g) * resolve(cfg.numExperts, g),
     shape: (cfg, g) => `top-${resolve(cfg.topK, g)} of ${resolve(cfg.numExperts, g)}`,
@@ -126,6 +142,7 @@ const PRIM = {
   custom_note: {
     name: "Annotation", icon: "✎", color: "#475569", category: "meta",
     desc: "Non-functional note / label",
+    info: "A non-functional label for documentation purposes. Use it to annotate your architecture with notes, mark decision points, or leave reminders. Has no effect on parameter counts.",
     defaultCfg: { text: "custom step" },
     params: () => 0, shape: (cfg) => cfg.text,
     configFields: [{ key: "text", label: "Note", type: "text" }],
@@ -311,6 +328,54 @@ const S = {
   label: { fontSize: 9, letterSpacing: "0.12em", textTransform: "uppercase", color: "#3e5775", fontWeight: 500, fontFamily: font },
 };
 
+// ─── Info Tooltip ─────────────────────────────────────────────────────
+function InfoTooltip({ text, color }) {
+  const [show, setShow] = useState(false);
+  const [pos, setPos] = useState({ top: 0, left: 0 });
+  const btnRef = useRef(null);
+
+  const handleEnter = () => {
+    if (btnRef.current) {
+      const rect = btnRef.current.getBoundingClientRect();
+      setPos({
+        top: rect.bottom + 6,
+        left: Math.max(8, Math.min(rect.left - 100, window.innerWidth - 260)),
+      });
+    }
+    setShow(true);
+  };
+
+  return (
+    <>
+      <button
+        ref={btnRef}
+        onMouseEnter={handleEnter}
+        onMouseLeave={() => setShow(false)}
+        onClick={e => { e.stopPropagation(); setShow(s => !s); }}
+        style={{
+          background: "none", border: "none", cursor: "pointer",
+          fontSize: 8, padding: "0 2px", color: show ? color : "#3e5775",
+          fontWeight: 700, lineHeight: 1, flexShrink: 0,
+          transition: "color 0.12s",
+        }}
+      >?</button>
+      {show && (
+        <div style={{
+          position: "fixed", top: pos.top, left: pos.left, zIndex: 999,
+          width: 240, padding: "8px 10px",
+          background: "#0c1220", border: `1px solid ${color}33`,
+          borderRadius: 5, boxShadow: `0 4px 16px rgba(0,0,0,0.5), 0 0 8px ${color}10`,
+          pointerEvents: "none",
+        }}>
+          <div style={{ fontSize: 9, fontWeight: 600, color, marginBottom: 3, fontFamily: font }}>{PRIM[text.type]?.icon} {PRIM[text.type]?.name}</div>
+          <div style={{ fontSize: 9, color: "#8899aa", lineHeight: 1.5, fontFamily: font }}>{text.info}</div>
+          <div style={{ fontSize: 8, color: "#2a3f55", marginTop: 4, fontStyle: "italic", fontFamily: font }}>{text.desc}</div>
+        </div>
+      )}
+    </>
+  );
+}
+
 // ─── Primitive Editor Row ─────────────────────────────────────────────
 function PrimRow({ prim, globalCfg, onUpdate, onRemove, onMove, isFirst, isLast, dragH }) {
   const reg = PRIM[prim.type];
@@ -355,6 +420,7 @@ function PrimRow({ prim, globalCfg, onUpdate, onRemove, onMove, isFirst, isLast,
           <button onClick={e => { e.stopPropagation(); onMove(1); }} disabled={isLast}
             style={{ background: "none", border: "none", color: isLast ? "#111827" : "#3e5775", cursor: isLast ? "default" : "pointer", fontSize: 7, padding: "0 1px" }}>▼</button>
         </div>
+        {reg.info && <InfoTooltip text={{ type: prim.type, info: reg.info, desc: reg.desc }} color={reg.color} />}
         {reg.configFields.length > 0 && (
           <button onClick={e => { e.stopPropagation(); onUpdate({ ...prim, _showCfg: !prim._showCfg }); }}
             style={{ background: "none", border: "none", color: "#3e5775", cursor: "pointer", fontSize: 8, padding: "0 2px" }}>⚙</button>
