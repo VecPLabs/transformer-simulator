@@ -11,6 +11,10 @@ import ConfigPanel from "./components/ConfigPanel";
 import StatsPanel from "./components/StatsPanel";
 import ShareModal from "./components/ShareModal";
 import Toast from "./components/Toast";
+import DiffView from "./components/DiffView";
+import PyTorchExport from "./components/PyTorchExport";
+import BatchOps from "./components/BatchOps";
+import ScatterPlot from "./components/ScatterPlot";
 import { buildExportPayload, parseImportData } from "./utils/exportImport";
 
 // ─── Factory helpers ──────────────────────────────────────────────────
@@ -371,7 +375,7 @@ export default function TransformerSimV2() {
 
         {/* Tabs */}
         <div style={{ display: "flex", gap: 2, marginBottom: 6 }}>
-          {[["build", "Build"], ["stats", "Stats"]].map(([k, l]) => (
+          {[["build", "Build"], ["stats", "Stats"], ["diff", "Diff"], ["code", "Code"]].map(([k, l]) => (
             <button key={k} onClick={() => setTab(k)} style={{
               flex: 1, padding: "5px 0", fontSize: 8, fontFamily: font, cursor: "pointer",
               textTransform: "uppercase", letterSpacing: "0.1em",
@@ -411,6 +415,9 @@ export default function TransformerSimV2() {
               ))}
             </div>
           </div>
+
+          {/* Batch Operations */}
+          <BatchOps layers={layers} onUpdateLayers={newLayers => setLayers(newLayers)} showToast={showToast} />
 
           {/* Global Config */}
           <ConfigPanel globalCfg={globalCfg} updateCfg={updateCfg} />
@@ -452,7 +459,27 @@ export default function TransformerSimV2() {
         </div>
       )}
 
-      {tab === "stats" && <StatsPanel stats={stats} globalCfg={globalCfg} />}
+      {tab === "stats" && (
+        <div>
+          <StatsPanel stats={stats} globalCfg={globalCfg} />
+          <div style={{ padding: "0 14px 14px" }}>
+            <ScatterPlot stats={stats} />
+          </div>
+        </div>
+      )}
+
+      {tab === "diff" && (
+        <DiffView
+          currentLayers={layers} currentCfg={globalCfg} currentName={archName}
+          showToast={showToast} onClose={() => setTab("build")}
+        />
+      )}
+
+      {tab === "code" && (
+        <div style={{ padding: "0 14px 14px" }}>
+          <PyTorchExport layers={layers} globalCfg={globalCfg} archName={archName} showToast={showToast} />
+        </div>
+      )}
 
       <div style={{ textAlign: "center", padding: "8px 0 16px", fontSize: 7, color: "#111827" }}>
         Drag primitives to reorder · Double-click block names to rename · ⚙ to configure · Ctrl+Z / Ctrl+Y to undo/redo
