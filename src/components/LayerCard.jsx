@@ -68,6 +68,19 @@ export default function LayerCard({ layer, idx, globalCfg, total, onUpdate, onRe
           Layer {idx + 1}
           <span style={{ color: "#2a3f55", marginLeft: 6, fontSize: 8 }}>{layer.blocks.length} blocks</span>
         </span>
+        {layer.blocks.length > 1 && (
+          <select
+            value={layer.topology || "sequential"}
+            onChange={e => onUpdate({ ...layer, topology: e.target.value, parallelCount: layer.parallelCount || Math.max(1, layer.blocks.length - 1) })}
+            onClick={e => e.stopPropagation()}
+            title="Block topology for code export"
+            style={{ background: "#080c16", border: "1px solid #172035", color: "#6b8299", fontFamily: font, fontSize: 7, padding: "1px 2px", borderRadius: 2 }}
+          >
+            <option value="sequential">Sequential</option>
+            <option value="parallel">Parallel</option>
+            <option value="parallel_then_sequential">Parallel → Seq</option>
+          </select>
+        )}
         <span style={{ fontSize: 9, color: "#22c55e", fontWeight: 600 }}>{fmt(layerParams)}</span>
         <div style={{ display: "flex", gap: 1 }}>
           <button onClick={() => onMoveLayer(-1)} disabled={idx === 0}
