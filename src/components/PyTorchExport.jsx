@@ -387,17 +387,19 @@ function generatePyTorch(layers, globalCfg) {
   }
   lines.push(`        self.norm = RMSNorm(config.hidden_dim)`);
   lines.push(`        self.lm_head = nn.Linear(config.hidden_dim, config.vocab_size, bias=False)`);
+  lines.push(`        # Weight tying: share embedding and output projection weights`);
+  lines.push(`        self.lm_head.weight = self.embed.weight`);
   lines.push(``);
   lines.push(`    def forward(self, input_ids):`);
   lines.push(`        x = self.embed(input_ids)`);
 
   if (firstLayerNames.length > 0) {
-    // Determine the representative topology for code emission
-    // If all layers share the same topology, emit a clean loop
     const allTopos = layerTopologies.map(t => t.topo);
     const uniformTopo = allTopos.every(t => t === allTopos[0]) ? allTopos[0] : null;
+    const topoDesc = uniformTopo || `mixed (${[...new Set(allTopos)].join(", ")})`;
+    lines.push(`        # Layer topology: ${topoDesc}`);
 
-    if (uniformTopo === "sequential" || (!uniformTopo && !allTopos.some(t => t !== "sequential"))) {
+    if (uniformTopo === "sequential") {
       lines.push(`        for layer_blocks in self.layers:`);
       lines.push(`            residual = x`);
       lines.push(`            for block in layer_blocks:`);
