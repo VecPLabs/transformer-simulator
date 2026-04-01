@@ -17,6 +17,8 @@ export function buildExportPayload({ archName, archAuthor, archDesc, stats, glob
     globalConfig: globalCfg,
     layers: layers.map((l, i) => ({
       layer: i + 1,
+      topology: l.topology || "sequential",
+      parallelCount: l.parallelCount,
       blocks: l.blocks.map(b => ({
         name: b.name,
         color: b.color,
@@ -88,7 +90,7 @@ export function parseImportData(data) {
         };
       });
 
-      return { id: uid(), collapsed: false, blocks };
+      return { id: uid(), collapsed: false, blocks, topology: layerData.topology || "sequential", parallelCount: layerData.parallelCount };
     });
   }
 
