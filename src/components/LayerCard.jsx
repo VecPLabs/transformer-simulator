@@ -81,6 +81,16 @@ export default function LayerCard({ layer, idx, globalCfg, total, onUpdate, onRe
             <option value="parallel_then_sequential">Parallel → Seq</option>
           </select>
         )}
+        {layer.topology === "parallel_then_sequential" && (
+          <input
+            type="number" min={1} max={layer.blocks.length}
+            value={layer.parallelCount || Math.max(1, layer.blocks.length - 1)}
+            onChange={e => onUpdate({ ...layer, parallelCount: Math.max(1, Math.min(layer.blocks.length, Number(e.target.value))) })}
+            onClick={e => e.stopPropagation()}
+            title="Number of parallel blocks"
+            style={{ width: 24, background: "#080c16", border: "1px solid #172035", color: "#6b8299", fontFamily: font, fontSize: 7, padding: "1px 2px", borderRadius: 2, textAlign: "center" }}
+          />
+        )}
         <span style={{ fontSize: 9, color: "#22c55e", fontWeight: 600 }}>{fmt(layerParams)}</span>
         <div style={{ display: "flex", gap: 1 }}>
           <button onClick={() => onMoveLayer(-1)} disabled={idx === 0}
