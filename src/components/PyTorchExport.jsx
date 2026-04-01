@@ -8,15 +8,12 @@ function sanitize(name) {
 }
 
 // ─── Dataflow Analysis ────────────────────────────────────────────────
-// Detect structural patterns in a block's primitives to emit correct code.
 
-function analyzeBlock(primitives) {
-  // Find scale_dot index
+function analyzeBlock(primitives, globalCfg) {
   const scaleDotIdx = primitives.findIndex(p => p.type === "scale_dot");
-  // Find gate_mul index
   const gateMulIdx = primitives.findIndex(p => p.type === "gate_mul");
 
-  // Detect attention fan-out: 3+ linear projections before a scale_dot
+  // Attention fan-out: 3+ linear projections before a scale_dot
   let attnPattern = null;
   if (scaleDotIdx >= 0) {
     const linearsBeforeAttn = [];
@@ -26,19 +23,34 @@ function analyzeBlock(primitives) {
       }
     }
     if (linearsBeforeAttn.length >= 3) {
+      // Resolve actual head counts from each projection's output dim
+      const qPrim = primitives[linearsBeforeAttn[0]];
+      const kPrim = primitives[linearsBeforeAttn[1]];
+      const vPrim = primitives[linearsBeforeAttn[2]];
+      const sdPrim = primitives[scaleDotIdx];
+      const headDim = resolve(sdPrim.cfg.headDim || "headDim", globalCfg);
+      const qOutDim = resolve(qPrim.cfg.outDim || "hiddenDim", globalCfg);
+      const kOutDim = resolve(kPrim.cfg.outDim || "hiddenDim", globalCfg);
+      const qHeads = headDim > 0 ? Math.floor(qOutDim / headDim) : resolve("heads", globalCfg);
+      const kvHeads = headDim > 0 ? Math.floor(kOutDim / headDim) : resolve("kvHeads", globalCfg);
+
       attnPattern = {
         qIdx: linearsBeforeAttn[0],
         kIdx: linearsBeforeAttn[1],
         vIdx: linearsBeforeAttn[2],
         scaleDotIdx,
-        // Output projection is typically the linear right after scale_dot
         outIdx: primitives.findIndex((p, i) =>
           i > scaleDotIdx && (p.type === "linear" || p.type === "linear_bias")),
+        qHeads,
+        kvHeads,
+        headDim,
+        needsGQAExpand: kvHeads > 0 && qHeads > kvHeads,
+        gqaRepeat: kvHeads > 0 ? Math.floor(qHeads / kvHeads) : 1,
       };
     }
   }
 
-  // Detect SwiGLU pattern: two linears before gate_mul, with activation on the first path
+  // SwiGLU: two linears before gate_mul, activation on first path
   let swigluPattern = null;
   if (gateMulIdx >= 0) {
     const linearsBeforeGate = [];
@@ -48,16 +60,12 @@ function analyzeBlock(primitives) {
       }
     }
     if (linearsBeforeGate.length >= 2) {
-      // Find activation between first linear and gate_mul (belongs to gate path)
       const gateLinearIdx = linearsBeforeGate[linearsBeforeGate.length - 2];
       const upLinearIdx = linearsBeforeGate[linearsBeforeGate.length - 1];
       let activationIdx = -1;
       for (let i = gateLinearIdx + 1; i < gateMulIdx; i++) {
         const t = primitives[i].type;
-        if (t === "silu" || t === "gelu" || t === "relu") {
-          activationIdx = i;
-          break;
-        }
+        if (t === "silu" || t === "gelu" || t === "relu") { activationIdx = i; break; }
       }
       swigluPattern = { gateLinearIdx, activationIdx, upLinearIdx, gateMulIdx };
     }
@@ -66,29 +74,24 @@ function analyzeBlock(primitives) {
   return { attnPattern, swigluPattern };
 }
 
-// ─── Code Generator ───────────────────────────────────────────────────
+// ─── Block Forward Code ───────────────────────────────────────────────
 
-function generateBlockForward(primitives, globalCfg, analysis) {
+function generateBlockForward(primitives, globalCfg, analysis, isParallelBranch) {
   const lines = [];
   const { attnPattern, swigluPattern } = analysis;
-
-  // Track which primitives are handled by pattern emission
   const handled = new Set();
 
-  // Pre-emit attention pattern
   if (attnPattern) {
     handled.add(attnPattern.qIdx);
     handled.add(attnPattern.kIdx);
     handled.add(attnPattern.vIdx);
     handled.add(attnPattern.scaleDotIdx);
-    // Also handle any rope between K/V and scale_dot
     for (let i = attnPattern.vIdx + 1; i < attnPattern.scaleDotIdx; i++) {
       if (primitives[i].type === "rope") handled.add(i);
     }
     if (attnPattern.outIdx >= 0) handled.add(attnPattern.outIdx);
   }
 
-  // Pre-emit SwiGLU pattern
   if (swigluPattern) {
     handled.add(swigluPattern.gateLinearIdx);
     handled.add(swigluPattern.upLinearIdx);
@@ -96,28 +99,32 @@ function generateBlockForward(primitives, globalCfg, analysis) {
     if (swigluPattern.activationIdx >= 0) handled.add(swigluPattern.activationIdx);
   }
 
-  // Emit primitives in order, using pattern-aware emission for detected patterns
   for (let i = 0; i < primitives.length; i++) {
     const p = primitives[i];
     const name = sanitize(p.label || `op_${i}`);
 
-    // --- Attention pattern emission ---
+    // --- Attention pattern ---
     if (attnPattern && i === attnPattern.qIdx) {
       const qName = sanitize(primitives[attnPattern.qIdx].label || "W_Q");
       const kName = sanitize(primitives[attnPattern.kIdx].label || "W_K");
       const vName = sanitize(primitives[attnPattern.vIdx].label || "W_V");
-      const h = resolve(primitives[attnPattern.scaleDotIdx].cfg.numHeads || "heads", globalCfg);
-      const d = resolve(primitives[attnPattern.scaleDotIdx].cfg.headDim || "headDim", globalCfg);
-      const hasRope = [...handled].some(idx => idx > attnPattern.vIdx && idx < attnPattern.scaleDotIdx && primitives[idx].type === "rope");
+      const { qHeads, kvHeads, headDim: hd, needsGQAExpand, gqaRepeat } = attnPattern;
+      const hasRope = [...handled].some(idx =>
+        idx > attnPattern.vIdx && idx < attnPattern.scaleDotIdx && primitives[idx].type === "rope");
 
       lines.push(`        h = x`);
       lines.push(`        bsz, seq_len, _ = h.shape`);
-      lines.push(`        q = self.${qName}(h).view(bsz, seq_len, ${h}, ${d}).transpose(1, 2)`);
-      lines.push(`        k = self.${kName}(h).view(bsz, seq_len, -1, ${d}).transpose(1, 2)`);
-      lines.push(`        v = self.${vName}(h).view(bsz, seq_len, -1, ${d}).transpose(1, 2)`);
+      lines.push(`        q = self.${qName}(h).view(bsz, seq_len, ${qHeads}, ${hd}).transpose(1, 2)`);
+      lines.push(`        k = self.${kName}(h).view(bsz, seq_len, ${kvHeads}, ${hd}).transpose(1, 2)`);
+      lines.push(`        v = self.${vName}(h).view(bsz, seq_len, ${kvHeads}, ${hd}).transpose(1, 2)`);
       if (hasRope) {
         lines.push(`        q = apply_rope(q, seq_len)`);
         lines.push(`        k = apply_rope(k, seq_len)`);
+      }
+      if (needsGQAExpand) {
+        lines.push(`        # GQA: expand ${kvHeads} KV heads to match ${qHeads} Q heads`);
+        lines.push(`        k = k.repeat_interleave(${gqaRepeat}, dim=1)`);
+        lines.push(`        v = v.repeat_interleave(${gqaRepeat}, dim=1)`);
       }
       lines.push(`        x = F.scaled_dot_product_attention(q, k, v)`);
       lines.push(`        x = x.transpose(1, 2).contiguous().view(bsz, seq_len, -1)`);
@@ -128,13 +135,12 @@ function generateBlockForward(primitives, globalCfg, analysis) {
       continue;
     }
 
-    // --- SwiGLU pattern emission ---
+    // --- SwiGLU pattern ---
     if (swigluPattern && i === swigluPattern.gateLinearIdx) {
       const gateName = sanitize(primitives[swigluPattern.gateLinearIdx].label || "W_gate");
       const upName = sanitize(primitives[swigluPattern.upLinearIdx].label || "W_up");
       const actType = swigluPattern.activationIdx >= 0 ? primitives[swigluPattern.activationIdx].type : "silu";
       const actFn = actType === "gelu" ? "F.gelu" : actType === "relu" ? "F.relu" : "F.silu";
-
       lines.push(`        h = x`);
       lines.push(`        gate = ${actFn}(self.${gateName}(h))`);
       lines.push(`        up = self.${upName}(h)`);
@@ -142,10 +148,15 @@ function generateBlockForward(primitives, globalCfg, analysis) {
       continue;
     }
 
-    // Skip handled primitives
     if (handled.has(i)) continue;
 
-    // --- Default sequential emission ---
+    // --- Skip residual_add inside parallel branches ---
+    if (isParallelBranch && p.type === "residual_add") {
+      lines.push(`        # residual add handled at layer level`);
+      continue;
+    }
+
+    // --- Default emission ---
     switch (p.type) {
       case "linear":
       case "linear_bias":
@@ -186,19 +197,19 @@ function generateBlockForward(primitives, globalCfg, analysis) {
       case "concat":
         lines.push(`        x = torch.cat([x, residual], dim=-1)`);
         break;
-      case "custom_note":
-        lines.push(`        # ${p.cfg.text || "annotation"}`);
-        break;
       case "gate_mul":
-        lines.push(`        x = gate * x  # element-wise gating`);
+        lines.push(`        x = gate * x`);
         break;
       case "scale_dot": {
-        const h = resolve(p.cfg.numHeads || "heads", globalCfg);
-        const d = resolve(p.cfg.headDim || "headDim", globalCfg);
-        lines.push(`        # Scaled dot-product attention (${h} heads, dim ${d})`);
+        const nh = resolve(p.cfg.numHeads || "heads", globalCfg);
+        const hd = resolve(p.cfg.headDim || "headDim", globalCfg);
+        lines.push(`        # Scaled dot-product attention (${nh} heads, dim ${hd})`);
         lines.push(`        x = F.scaled_dot_product_attention(q, k, v)`);
         break;
       }
+      case "custom_note":
+        lines.push(`        # ${p.cfg.text || "annotation"}`);
+        break;
       default:
         lines.push(`        # ${p.type}: ${p.label}`);
     }
@@ -206,6 +217,8 @@ function generateBlockForward(primitives, globalCfg, analysis) {
 
   return lines;
 }
+
+// ─── Main Generator ───────────────────────────────────────────────────
 
 function generatePyTorch(layers, globalCfg) {
   const hiddenDim = globalCfg.hiddenDim;
@@ -237,7 +250,6 @@ function generatePyTorch(layers, globalCfg) {
   lines.push(``);
   lines.push(``);
 
-  // RMSNorm helper
   lines.push(`class RMSNorm(nn.Module):`);
   lines.push(`    def __init__(self, dim, eps=1e-6):`);
   lines.push(`        super().__init__()`);
@@ -249,97 +261,129 @@ function generatePyTorch(layers, globalCfg) {
   lines.push(``);
   lines.push(``);
 
-  // RoPE helper
   lines.push(`def apply_rope(x, seq_len):`);
   lines.push(`    """Simplified RoPE — replace with full implementation for production."""`);
   lines.push(`    d = x.shape[-1]`);
   lines.push(`    pos = torch.arange(seq_len, device=x.device).unsqueeze(1)`);
-  lines.push(`    dim = torch.arange(0, d, 2, device=x.device).float()`);
-  lines.push(`    freqs = pos / (10000.0 ** (dim / d))`);
+  lines.push(`    dim_idx = torch.arange(0, d, 2, device=x.device).float()`);
+  lines.push(`    freqs = pos / (10000.0 ** (dim_idx / d))`);
   lines.push(`    cos_f, sin_f = freqs.cos(), freqs.sin()`);
   lines.push(`    x1, x2 = x[..., ::2], x[..., 1::2]`);
   lines.push(`    return torch.stack([x1 * cos_f - x2 * sin_f, x1 * sin_f + x2 * cos_f], dim=-1).flatten(-2)`);
   lines.push(``);
   lines.push(``);
 
-  // Generate block classes
-  const blockClasses = new Map();
-  const blockClassNames = [];
+  // Collect ALL unique block signatures across all layers
+  const blockClasses = new Map(); // sig -> { className, block, isParallel }
 
-  if (layers.length > 0) {
-    layers[0].blocks.forEach((block, bIdx) => {
-      const sig = block.primitives.map(p => `${p.type}:${JSON.stringify(p.cfg)}`).join("|");
-      if (blockClasses.has(sig)) {
-        blockClassNames.push(blockClasses.get(sig).className);
-        return;
+  // Determine per-layer topology info
+  const layerTopologies = layers.map(l => {
+    const topo = l.topology || "sequential";
+    const pc = l.parallelCount || (topo !== "sequential" ? l.blocks.length : 0);
+    return { topo, parallelCount: pc };
+  });
+
+  // Scan all layers for unique block classes
+  layers.forEach((layer, li) => {
+    const { topo, parallelCount } = layerTopologies[li];
+    layer.blocks.forEach((block, bIdx) => {
+      const isParallel = topo === "parallel" || (topo === "parallel_then_sequential" && bIdx < parallelCount);
+      const sig = block.primitives.map(p => `${p.type}:${JSON.stringify(p.cfg)}`).join("|") + `|parallel:${isParallel}`;
+
+      if (!blockClasses.has(sig)) {
+        // Ensure unique class names
+        let className = sanitize(block.name || `Block${bIdx}`);
+        const existing = new Set([...blockClasses.values()].map(v => v.className));
+        let suffix = 2;
+        const base = className;
+        while (existing.has(className)) { className = `${base}_${suffix++}`; }
+
+        blockClasses.set(sig, { className, block, isParallel });
       }
-
-      const className = sanitize(block.name || `Block${bIdx}`);
-      blockClasses.set(sig, { className, block });
-      blockClassNames.push(className);
-
-      const analysis = analyzeBlock(block.primitives);
-
-      lines.push(`class ${className}(nn.Module):`);
-      lines.push(`    def __init__(self, config: ModelConfig):`);
-      lines.push(`        super().__init__()`);
-
-      // Init: emit nn.Module attributes for primitives with learnable params
-      block.primitives.forEach((p, pIdx) => {
-        const name = sanitize(p.label || `op_${pIdx}`);
-        const inD = resolve(p.cfg.inDim || "hiddenDim", globalCfg);
-        const outD = resolve(p.cfg.outDim || "hiddenDim", globalCfg);
-
-        switch (p.type) {
-          case "linear":
-            lines.push(`        self.${name} = nn.Linear(${inD}, ${outD}, bias=False)`);
-            break;
-          case "linear_bias":
-            lines.push(`        self.${name} = nn.Linear(${inD}, ${outD}, bias=True)`);
-            break;
-          case "rmsnorm":
-            lines.push(`        self.${name} = RMSNorm(${resolve(p.cfg.dim || "hiddenDim", globalCfg)})`);
-            break;
-          case "layernorm":
-            lines.push(`        self.${name} = nn.LayerNorm(${resolve(p.cfg.dim || "hiddenDim", globalCfg)})`);
-            break;
-          case "dropout":
-            lines.push(`        self.${name} = nn.Dropout(${p.cfg.rate || 0.1})`);
-            break;
-        }
-      });
-
-      lines.push(``);
-      lines.push(`    def forward(self, x, residual=None):`);
-
-      // Forward: pattern-aware emission
-      const fwdLines = generateBlockForward(block.primitives, globalCfg, analysis);
-      fwdLines.forEach(l => lines.push(l));
-
-      lines.push(`        return x`);
-      lines.push(``);
-      lines.push(``);
     });
+  });
+
+  // Emit block classes
+  for (const [, { className, block, isParallel }] of blockClasses) {
+    const analysis = analyzeBlock(block.primitives, globalCfg);
+
+    lines.push(`class ${className}(nn.Module):`);
+    lines.push(`    def __init__(self, config: ModelConfig):`);
+    lines.push(`        super().__init__()`);
+
+    block.primitives.forEach((p, pIdx) => {
+      const name = sanitize(p.label || `op_${pIdx}`);
+      const inD = resolve(p.cfg.inDim || "hiddenDim", globalCfg);
+      const outD = resolve(p.cfg.outDim || "hiddenDim", globalCfg);
+      switch (p.type) {
+        case "linear":
+          lines.push(`        self.${name} = nn.Linear(${inD}, ${outD}, bias=False)`);
+          break;
+        case "linear_bias":
+          lines.push(`        self.${name} = nn.Linear(${inD}, ${outD}, bias=True)`);
+          break;
+        case "rmsnorm":
+          lines.push(`        self.${name} = RMSNorm(${resolve(p.cfg.dim || "hiddenDim", globalCfg)})`);
+          break;
+        case "layernorm":
+          lines.push(`        self.${name} = nn.LayerNorm(${resolve(p.cfg.dim || "hiddenDim", globalCfg)})`);
+          break;
+        case "dropout":
+          lines.push(`        self.${name} = nn.Dropout(${p.cfg.rate || 0.1})`);
+          break;
+      }
+    });
+
+    lines.push(``);
+    if (isParallel) {
+      lines.push(`    def forward(self, x):`);
+    } else {
+      lines.push(`    def forward(self, x, residual=None):`);
+    }
+
+    const fwdLines = generateBlockForward(block.primitives, globalCfg, analysis, isParallel);
+    fwdLines.forEach(l => lines.push(l));
+    lines.push(`        return x`);
+    lines.push(``);
+    lines.push(``);
   }
 
-  // Main model class
-  const firstLayerTopology = layers.length > 0 ? (layers[0].topology || "sequential") : "sequential";
-  const hasParallel = layers.some(l => l.topology === "parallel" || l.topology === "parallel_then_sequential");
+  // Build per-layer block class name lists
+  const layerBlockClassNames = layers.map((layer, li) => {
+    const { topo, parallelCount } = layerTopologies[li];
+    return layer.blocks.map((block, bIdx) => {
+      const isParallel = topo === "parallel" || (topo === "parallel_then_sequential" && bIdx < parallelCount);
+      const sig = block.primitives.map(p => `${p.type}:${JSON.stringify(p.cfg)}`).join("|") + `|parallel:${isParallel}`;
+      return blockClasses.get(sig).className;
+    });
+  });
 
+  // Check if all layers have the same block layout (for ModuleList sharing)
+  const firstLayerNames = layerBlockClassNames[0] || [];
+  const allLayersSame = layerBlockClassNames.every(names =>
+    names.length === firstLayerNames.length && names.every((n, i) => n === firstLayerNames[i]));
+
+  // Model class
   lines.push(`class TransformerModel(nn.Module):`);
   lines.push(`    def __init__(self, config: ModelConfig):`);
   lines.push(`        super().__init__()`);
   lines.push(`        self.config = config`);
   lines.push(`        self.embed = nn.Embedding(config.vocab_size, config.hidden_dim)`);
 
-  if (blockClassNames.length > 0) {
-    lines.push(`        self.layers = nn.ModuleList([`);
-    lines.push(`            nn.ModuleList([`);
-    blockClassNames.forEach(cn => {
-      lines.push(`                ${cn}(config),`);
-    });
-    lines.push(`            ]) for _ in range(config.num_layers)`);
-    lines.push(`        ])`);
+  if (firstLayerNames.length > 0) {
+    if (allLayersSame) {
+      lines.push(`        self.layers = nn.ModuleList([`);
+      lines.push(`            nn.ModuleList([`);
+      firstLayerNames.forEach(cn => lines.push(`                ${cn}(config),`));
+      lines.push(`            ]) for _ in range(config.num_layers)`);
+      lines.push(`        ])`);
+    } else {
+      lines.push(`        self.layers = nn.ModuleList([`);
+      layerBlockClassNames.forEach((names, li) => {
+        lines.push(`            nn.ModuleList([${names.map(n => `${n}(config)`).join(", ")}]),  # Layer ${li + 1}`);
+      });
+      lines.push(`        ])`);
+    }
   }
   lines.push(`        self.norm = RMSNorm(config.hidden_dim)`);
   lines.push(`        self.lm_head = nn.Linear(config.hidden_dim, config.vocab_size, bias=False)`);
@@ -347,33 +391,76 @@ function generatePyTorch(layers, globalCfg) {
   lines.push(`    def forward(self, input_ids):`);
   lines.push(`        x = self.embed(input_ids)`);
 
-  if (blockClassNames.length > 0) {
-    if (hasParallel) {
-      // Layer topology is per-layer; for code gen we use the first layer's topology as representative
-      const topo = firstLayerTopology;
-      if (topo === "parallel") {
-        lines.push(`        for layer_blocks in self.layers:`);
-        lines.push(`            residual = x`);
-        lines.push(`            branch_sum = sum(block(x) for block in layer_blocks)`);
-        lines.push(`            x = residual + branch_sum`);
-      } else if (topo === "parallel_then_sequential") {
-        // Find the split point from the first layer
-        const parallelCount = layers[0].parallelCount || layers[0].blocks.length - 1;
-        lines.push(`        for layer_blocks in self.layers:`);
-        lines.push(`            residual = x`);
-        lines.push(`            # Parallel branches`);
-        lines.push(`            branch_sum = sum(layer_blocks[i](x) for i in range(${parallelCount}))`);
-        lines.push(`            x = residual + branch_sum`);
-        lines.push(`            # Sequential blocks`);
-        lines.push(`            for block in layer_blocks[${parallelCount}:]:`);
-        lines.push(`                residual = x`);
-        lines.push(`                x = block(x, residual=residual)`);
-      }
-    } else {
+  if (firstLayerNames.length > 0) {
+    // Determine the representative topology for code emission
+    // If all layers share the same topology, emit a clean loop
+    const allTopos = layerTopologies.map(t => t.topo);
+    const uniformTopo = allTopos.every(t => t === allTopos[0]) ? allTopos[0] : null;
+
+    if (uniformTopo === "sequential" || (!uniformTopo && !allTopos.some(t => t !== "sequential"))) {
       lines.push(`        for layer_blocks in self.layers:`);
       lines.push(`            residual = x`);
       lines.push(`            for block in layer_blocks:`);
       lines.push(`                x = block(x, residual=residual)`);
+    } else if (uniformTopo === "parallel") {
+      lines.push(`        for layer_blocks in self.layers:`);
+      lines.push(`            residual = x`);
+      lines.push(`            branch_outputs = [block(x) for block in layer_blocks]`);
+      lines.push(`            x = residual + sum(branch_outputs)`);
+    } else if (uniformTopo === "parallel_then_sequential") {
+      const pc = layerTopologies[0].parallelCount;
+      lines.push(`        for layer_blocks in self.layers:`);
+      lines.push(`            residual = x`);
+      lines.push(`            # Parallel branches (${pc} blocks)`);
+      lines.push(`            branch_outputs = [layer_blocks[i](x) for i in range(${pc})]`);
+      lines.push(`            x = residual + sum(branch_outputs)`);
+      if (firstLayerNames.length > pc) {
+        lines.push(`            # Sequential blocks`);
+        lines.push(`            for block in layer_blocks[${pc}:]:`);
+        lines.push(`                residual = x`);
+        lines.push(`                x = block(x, residual=residual)`);
+      }
+    } else {
+      // Mixed topologies — emit per-layer logic
+      lines.push(`        for li, layer_blocks in enumerate(self.layers):`);
+      // Group layers by topology
+      const topoGroups = [];
+      let currentGroup = null;
+      allTopos.forEach((t, i) => {
+        const pc = layerTopologies[i].parallelCount;
+        const key = `${t}:${pc}`;
+        if (!currentGroup || currentGroup.key !== key) {
+          currentGroup = { key, topo: t, pc, start: i, end: i };
+          topoGroups.push(currentGroup);
+        } else {
+          currentGroup.end = i;
+        }
+      });
+
+      topoGroups.forEach(g => {
+        const cond = g.start === g.end
+          ? `li == ${g.start}`
+          : `${g.start} <= li <= ${g.end}`;
+        if (g.topo === "sequential") {
+          lines.push(`            if ${cond}:`);
+          lines.push(`                residual = x`);
+          lines.push(`                for block in layer_blocks:`);
+          lines.push(`                    x = block(x, residual=residual)`);
+        } else if (g.topo === "parallel") {
+          lines.push(`            if ${cond}:`);
+          lines.push(`                residual = x`);
+          lines.push(`                branch_outputs = [block(x) for block in layer_blocks]`);
+          lines.push(`                x = residual + sum(branch_outputs)`);
+        } else {
+          lines.push(`            if ${cond}:`);
+          lines.push(`                residual = x`);
+          lines.push(`                branch_outputs = [layer_blocks[i](x) for i in range(${g.pc})]`);
+          lines.push(`                x = residual + sum(branch_outputs)`);
+          lines.push(`                for block in layer_blocks[${g.pc}:]:`);
+          lines.push(`                    residual = x`);
+          lines.push(`                    x = block(x, residual=residual)`);
+        }
+      });
     }
   }
 
