@@ -122,11 +122,11 @@ function generateBlockForward(primitives, globalCfg, analysis, isParallelBranch)
         lines.push(`        k = apply_rope(k, seq_len)`);
       }
       if (needsGQAExpand) {
-        lines.push(`        # GQA: expand ${kvHeads} KV heads to match ${qHeads} Q heads`);
-        lines.push(`        k = k.repeat_interleave(${gqaRepeat}, dim=1)`);
-        lines.push(`        v = v.repeat_interleave(${gqaRepeat}, dim=1)`);
+        lines.push(`        # GQA: expand ${kvHeads} KV heads to match ${qHeads} Q heads (zero-copy)`);
+        lines.push(`        k = k[:, :, None, :, :].expand(-1, -1, ${gqaRepeat}, -1, -1).reshape(bsz, ${qHeads}, seq_len, ${hd})`);
+        lines.push(`        v = v[:, :, None, :, :].expand(-1, -1, ${gqaRepeat}, -1, -1).reshape(bsz, ${qHeads}, seq_len, ${hd})`);
       }
-      lines.push(`        x = F.scaled_dot_product_attention(q, k, v)`);
+      lines.push(`        x = F.scaled_dot_product_attention(q, k, v, is_causal=True)`);
       lines.push(`        x = x.transpose(1, 2).contiguous().view(bsz, seq_len, -1)`);
       if (attnPattern.outIdx >= 0) {
         const outName = sanitize(primitives[attnPattern.outIdx].label || "W_O");
@@ -204,7 +204,7 @@ function generateBlockForward(primitives, globalCfg, analysis, isParallelBranch)
         const nh = resolve(p.cfg.numHeads || "heads", globalCfg);
         const hd = resolve(p.cfg.headDim || "headDim", globalCfg);
         lines.push(`        # Scaled dot-product attention (${nh} heads, dim ${hd})`);
-        lines.push(`        x = F.scaled_dot_product_attention(q, k, v)`);
+        lines.push(`        x = F.scaled_dot_product_attention(q, k, v, is_causal=True)`);
         break;
       }
       case "custom_note":
@@ -262,12 +262,13 @@ function generatePyTorch(layers, globalCfg) {
   lines.push(``);
 
   lines.push(`def apply_rope(x, seq_len):`);
-  lines.push(`    """Simplified RoPE — replace with full implementation for production."""`);
+  lines.push(`    """Simplified RoPE — replace with a production implementation for real training."""`);
   lines.push(`    d = x.shape[-1]`);
   lines.push(`    pos = torch.arange(seq_len, device=x.device).unsqueeze(1)`);
   lines.push(`    dim_idx = torch.arange(0, d, 2, device=x.device).float()`);
   lines.push(`    freqs = pos / (10000.0 ** (dim_idx / d))`);
-  lines.push(`    cos_f, sin_f = freqs.cos(), freqs.sin()`);
+  lines.push(`    cos_f = freqs.cos().to(x.dtype)`);
+  lines.push(`    sin_f = freqs.sin().to(x.dtype)`);
   lines.push(`    x1, x2 = x[..., ::2], x[..., 1::2]`);
   lines.push(`    return torch.stack([x1 * cos_f - x2 * sin_f, x1 * sin_f + x2 * cos_f], dim=-1).flatten(-2)`);
   lines.push(``);
@@ -402,8 +403,8 @@ function generatePyTorch(layers, globalCfg) {
 
     if (uniformTopo === "sequential") {
       lines.push(`        for layer_blocks in self.layers:`);
-      lines.push(`            residual = x`);
       lines.push(`            for block in layer_blocks:`);
+      lines.push(`                residual = x`);
       lines.push(`                x = block(x, residual=residual)`);
     } else if (uniformTopo === "parallel") {
       lines.push(`        for layer_blocks in self.layers:`);
@@ -446,8 +447,8 @@ function generatePyTorch(layers, globalCfg) {
           : `${g.start} <= li <= ${g.end}`;
         if (g.topo === "sequential") {
           lines.push(`            if ${cond}:`);
-          lines.push(`                residual = x`);
           lines.push(`                for block in layer_blocks:`);
+          lines.push(`                    residual = x`);
           lines.push(`                    x = block(x, residual=residual)`);
         } else if (g.topo === "parallel") {
           lines.push(`            if ${cond}:`);
