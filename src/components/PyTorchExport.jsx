@@ -388,6 +388,7 @@ function generatePyTorch(layers, globalCfg) {
   lines.push(`        self.norm = RMSNorm(config.hidden_dim)`);
   lines.push(`        self.lm_head = nn.Linear(config.hidden_dim, config.vocab_size, bias=False)`);
   lines.push(`        # Weight tying: share embedding and output projection weights`);
+  lines.push(`        nn.init.normal_(self.embed.weight, std=0.01)`);
   lines.push(`        self.lm_head.weight = self.embed.weight`);
   lines.push(``);
   lines.push(`    def forward(self, input_ids):`);
